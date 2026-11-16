@@ -1,0 +1,191 @@
+name: iPadOS 27.3 Jailbreak Build
+
+on:
+  push:
+    branches: [ "main", "master" ]
+    paths:
+      - 'jailbreak/**'
+      - 'tools/**'
+      - '.github/workflows/ipados273-jailbreak.yml'
+  pull_request:
+    branches: [ "main", "master" ]
+    paths:
+      - 'jailbreak/**'
+      - 'tools/**'
+      - '.github/workflows/ipados273-jailbreak.yml'
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build type (release, staging, debug)'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - staging
+          - debug
+      build_for:
+        description: 'Target iOS/iPadOS version'
+        required: true
+        default: '27.3'
+        type: choice
+        options:
+          - 27.2
+          - 27.3
+          - 27.4
+
+env:
+  BUILD_TYPE: ${{ inputs.build_type || 'release' }}
+  TARGET_VERSION: ${{ inputs.build_for || '27.3' }}
+  REPO_OWNER: d51youkun
+  REPO_NAME: iPadOS27.3-JailBreak
+
+jobs:
+  build-jailbreak:
+    name: Build Jailbreak IPA
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+      packages: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.cache
+          key: ${{ runner.os }}-cache-${{ env.TARGET_VERSION }}-${{ env.BUILD_TYPE }}
+          restore-keys: |
+            ${{ runner.os }}-cache-${{ env.TARGET_VERSION }}-
+            ${{ runner.os }}-cache-
+
+      - name: Set environment variables
+        run: |
+          echo "BUILD_TYPE=$BUILD_TYPE" >> $GITHUB_ENV
+          echo "TARGET_VERSION=$TARGET_VERSION" >> $GITHUB_ENV
+          echo "REPO_OWNER=$REPO_OWNER" >> $GITHUB_ENV
+          echo "REPO_NAME=$REPO_NAME" >> $GITHUB_ENV
+          echo "BRANCH_NAME=$(echo "${GITHUB_REF#refsheads/}" | tr '/' '-')" >> $GITHUB_ENV
+          echo "COMMIT_SHA=${GITHUB_SHA:0:7}" >> $GITHUB_ENV
+
+      - name: Build Jailbreak IPA
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          build-args: |
+            BUILD_TYPE=${{ env.BUILD_TYPE }}
+            TARGET_VERSION=${{ env.TARGET_VERSION }}
+          tags: |
+            ${{ env.REPO_OWNER }}/${{ env.REPO_NAME }}/build:latest
+            ${{ env.REPO_OWNER }}/${{ env.REPO_NAME }}/build:${{ env.TARGET_VERSION }}-${{ env.BUILD_TYPE }}-${{ env.COMMIT_SHA }}
+          cache-from: type=local,src=/tmp/.cache
+          cache-to: type=local,dest=/tmp/.cache-new,mode=max
+          pull: true
+          load: true
+
+      - name: Extract IPA from container
+        run: |
+          docker run --rm \
+            --volume $(pwd):/build \
+            ${{ env.REPO_OWNER }}/${{ env.REPO_NAME }}/build:latest \
+            build-ipa \
+            ${{ env.TARGET_VERSION }} \
+            ${{ env.BUILD_TYPE }}
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iPadOS-${{ env.TARGET_VERSION }}-Jailbreak-${{ env.BUILD_TYPE }}-${{ env.COMMIT_SHA }}.ipa
+          path: iPadOS-${{ env.TARGET_VERSION }}-Jailbreak-${{ env.BUILD_TYPE }}-${{ env.COMMIT_SHA }}.ipa
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Release to GitHub Releases
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v1
+        with:
+          generate_release_notes: true
+          files: |
+            iPadOS-${{ env.TARGET_VERSION }}-Jailbreak-${{ env.BUILD_TYPE }}-${{ env.COMMIT_SHA }}.ipa
+          tag_name: jailbreak-${{ env.TARGET_VERSION }}-${{ env.COMMIT_SHA }}
+          name: "iPadOS ${{ env.TARGET_VERSION }} Jailbreak (${{ env.BUILD_TYPE }})"
+          draft: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify on success
+        if: success() && github.event_name == 'workflow_dispatch'
+        run: |
+          echo "Build completed successfully!"
+          echo "IPA: iPadOS-${{ env.TARGET_VERSION }}-Jailbreak-${{ env.BUILD_TYPE }}-${{ env.COMMIT_SHA }}.ipa"
+          echo "Artifact uploaded: $(ls -lh iPadOS-${{ env.TARGET_VERSION }}-Jailbreak-${{ env.BUILD_TYPE }}-${{ env.COMMIT_SHA }}.ipa 2>/dev/null | awk '{print $5}')"
+
+  validate:
+    name: Validate Build
+    runs-on: ubuntu-latest
+    needs: build-jailbreak
+    
+    steps:
+      - name: Download IPA artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: iPadOS-${{ env.TARGET_VERSION }}-Jailbreak-${{ env.BUILD_TYPE }}-${{ env.COMMIT_SHA }}.ipa
+          path: .
+
+      - name: Validate IPA file
+        run: |
+          echo "Validating IPA file..."
+          
+          if [ ! -f "iPadOS-${{ env.TARGET_VERSION }}-Jailbreak-${{ env.BUILD_TYPE }}-${{ env.COMMIT_SHA }}.ipa" ]; then
+            echo "Error: IPA file not found!"
+            exit 1
+          fi
+
+          # Check file size
+          FILE_SIZE=$(ls -lh iPadOS-${{ env.TARGET_VERSION }}-Jailbreak-${{ env.BUILD_TYPE }}-${{ env.COMMIT_SHA }}.ipa | awk '{print $5}')
+          echo "File size: $FILE_SIZE"
+
+          if [ "${FILE_SIZE:0:1}" = "0" ] || [ "${FILE_SIZE:0:1}" = "." ]; then
+            echo "Error: File size seems invalid ($FILE_SIZE)"
+            exit 1
+          fi
+
+          # Validate with pkgutil
+          pkgutil --check-signature iPadOS-${{ env.TARGET_VERSION }}-Jailbreak-${{ env.BUILD_TYPE }}-${{ env.COMMIT_SHA }}.ipa 2>&1 || true
+
+          echo "Validation completed!"
+
+  deploy:
+    name: Deploy to Server
+    runs-on: ubuntu-latest
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true'
+    
+    steps:
+      - name: Download IPA artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: iPadOS-${{ env.TARGET_VERSION }}-Jailbreak-${{ env.BUILD_TYPE }}-${{ env.COMMIT_SHA }}.ipa
+          path: .
+
+      - name: Deploy to server
+        run: |
+          echo "Deploying to server..."
+          # Add your deployment logic here
+          # Example:
+          # scp iPadOS-${{ env.TARGET_VERSION }}-Jailbreak-${{ env.BUILD_TYPE }}-${{ env.COMMIT_SHA }}.ipa user@server:/path/to/releases/
+
+      - name: Notify deployment
+        run: |
+          echo "Deployment initiated!"
