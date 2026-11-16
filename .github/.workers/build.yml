@@ -1,0 +1,244 @@
+name: iPadOS Jailbreak & Sileo Installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      ipa_upload_url:
+        description: 'Upload your built IPA to GitHub Releases first, then paste the asset URL'
+        required: true
+      device_id:
+        description: 'Target iPad device ID (from iBecommunicator)'
+        required: true
+
+env:
+  IPA_URL: ${{ inputs.ipa_upload_url }}
+  DEVICE_ID: ${{ inputs.device_id }}
+
+jobs:
+  validate-and-download:
+    runs-on: macos-15
+    outputs:
+      ipa_path: ${{ steps.extract.outputs.ipa_path }}
+    steps:
+      - name: Download IPA
+        run: |
+          curl -L ${{ env.IPA_URL }} -o ./app.ipa
+          ls -lh ./app.ipa
+
+      - name: Extract IPA
+        run: |
+          mkdir -p extracted
+          unzip -o ./app.ipa -d extracted
+          ls -lh extracted/
+          echo "ipa_path=extracted/$(ls extracted/*.ipa 2>/dev/null | head -1)" >> $GITHUB_OUTPUT
+        id: extract
+
+  build-signer:
+    needs: validate-and-download
+    runs-on: macos-15
+    outputs:
+      signer_token: ${{ steps.token.outputs.token }}
+    steps:
+      - name: Get Apple ID Token
+        run: |
+          # User must insert their Apple ID credentials securely
+          # This is a placeholder - in production use secrets
+          echo "token=YOUR_APPLE_ID_TOKEN_HERE" >> $GITHUB_OUTPUT
+        id: token
+
+  create-ipsw:
+    needs: [validate-and-download, build-signer]
+    runs-on: macos-15
+    env:
+      SIGNER_TOKEN: ${{ needs.build-signer.outputs.signer_token }}
+    steps:
+      - name: Convert IPA to IPSW
+        run: |
+          # Using a custom IPSW builder tool
+          # User needs to provide the tool via artifact or GitHub Actions marketplace
+          echo "Converting IPA to IPSW format..."
+          # Example command (replace with actual tool):
+          # ipsw-builder convert ./extracted/*.ipa ./output/ipados.ipsw
+          
+      - name: Upload IPSW
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipados-ipsw
+          path: output/*.ipsw
+
+  generate-booster:
+    needs: create-ipsw
+    runs-on: macos-15
+    steps:
+      - name: Build Jailbreak Booster App
+        run: |
+          # Generate a minimal UI that matches Dopamine aesthetic
+          # The app will:
+          # 1. Connect to device via iBecommunicator
+          # 2. Auto-detect jailbreak state
+          # 3. Trigger jailbreak if needed
+          # 4. Install Sileo automatically
+          
+          cat > jailbreak-booster.py << 'EOF'
+#!/usr/bin/env python3
+import asyncio
+import websockets
+import json
+
+class DopamineStyleBooster:
+    def __init__(self):
+        self.ui_color = "#1a1a2e"
+        self.accent_color = "#e94560"
+        self.text_color = "#ffffff"
+        
+    async def launch(self, device_id):
+        # Beautiful gradient background
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <title>iPadOS Jailbreak</title>
+            <style>
+                * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+                body {{
+                    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', sans-serif;
+                    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+                    color: {self.text_color};
+                    min-height: 100vh;
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    justify-content: center;
+                }}
+                .container {{
+                    text-align: center;
+                    padding: 40px;
+                    max-width: 400px;
+                }}
+                h1 {{
+                    font-size: 32px;
+                    font-weight: 700;
+                    margin-bottom: 20px;
+                    background: linear-gradient(90deg, #00d2ff, #3a86ff);
+                    -webkit-background-clip: text;
+                    -webkit-text-fill-color: transparent;
+                    background-clip: text;
+                }}
+                .status {{
+                    background: rgba(255,255,255,0.1);
+                    border-radius: 16px;
+                    padding: 20px;
+                    margin: 20px 0;
+                    backdrop-filter: blur(10px);
+                }}
+                .progress {{
+                    width: 100%;
+                    height: 6px;
+                    background: rgba(255,255,255,0.1);
+                    border-radius: 3px;
+                    overflow: hidden;
+                    margin-top: 15px;
+                }}
+                .progress-bar {{
+                    height: 100%;
+                    background: linear-gradient(90deg, #00d2ff, #e94560);
+                    transition: width 0.3s ease;
+                    border-radius: 3px;
+                }}
+                .button {{
+                    background: linear-gradient(135deg, #00d2ff, #3a86ff);
+                    color: white;
+                    border: none;
+                    padding: 16px 32px;
+                    border-radius: 14px;
+                    font-size: 16px;
+                    font-weight: 600;
+                    cursor: pointer;
+                    margin-top: 20px;
+                    transition: transform 0.2s, box-shadow 0.2s;
+                }}
+                .button:active {{
+                    transform: scale(0.98);
+                }}
+                .message {{
+                    margin: 10px 0;
+                    font-size: 14px;
+                    opacity: 0.8;
+                }}
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>🔓 iPadOS Unlock</h1>
+                <p class="message">Connect your device via iBecommunicator</p>
+                <div class="status">
+                    <div id="status">Waiting for device...</div>
+                    <div class="progress">
+                        <div class="progress-bar" id="progress" style="width: 0%"></div>
+                    </div>
+                </div>
+                <button class="button" id="launchBtn" onclick="launch()">
+                    🔓 JAILBREAK NOW
+                </button>
+            </div>
+            <script>
+                async function launch() {
+                    document.getElementById('launchBtn').disabled = true;
+                    document.getElementById('launchBtn').textContent = 'Initializing...';
+                    
+                    // Connect to WebSocket server
+                    const ws = new WebSocket('ws://localhost:8080');
+                    
+                    ws.onmessage = (event) => {
+                        const data = JSON.parse(event.data);
+                        updateUI(data);
+                    };
+                    
+                    ws.onclose = () => {
+                        document.getElementById('status').textContent = 'Disconnected';
+                        document.getElementById('launchBtn').disabled = false;
+                        document.getElementById('launchBtn').textContent = '🔓 JAILBREAK NOW';
+                    };
+                }
+                
+                function updateUI(data) {
+                    const statusEl = document.getElementById('status');
+                    const progressEl = document.getElementById('progress');
+                    
+                    statusEl.textContent = data.message;
+                    progressEl.style.width = data.progress + '%';
+                    
+                    if (data.stage === 'completed') {
+                        document.getElementById('launchBtn').textContent = '✅ COMPLETED';
+                    }
+                }
+            </script>
+        </body>
+        </html>
+        """
+        
+        # Implement WebSocket server logic here
+        pass
+
+if __name__ == '__main__':
+    booster = DopamineStyleBooster()
+    # asyncio.run(booster.launch('DEVICE_ID'))
+EOF
+          ls -lh jailbreak-booster.py
+      - name: Upload Booster
+        uses: actions/upload-artifact@v4
+        with:
+          name: jailbreak-booster
+          path: jailbreak-booster.py
+
+  deploy:
+    needs: [generate-booster]
+    runs-on: macos-15
+    steps:
+      - name: Deploy to Device
+        run: |
+          # This step would deploy the booster app to the iPad
+          # and automatically trigger the jailbreak process
+          echo "Deploying Dopamine-style jailbreak booster to device ${{ env.DEVICE_ID }}"
+          # Integration with iBecommunicator would happen here
